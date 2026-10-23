@@ -1,112 +1,129 @@
-# Roadmap — scanner web passivo de URL
+# Roadmap — WebScan: do baseline à análise ativa
 
-> **Objetivo:** construir em poucas semanas um scanner pequeno, útil e testável, enquanto aprende fundamentos de AppSec. A primeira versão verifica sinais observáveis numa aplicação web; não promete encontrar todas as vulnerabilidades.
+> **Novo objetivo:** evoluir o comando existente `webscan scan` com uma verificação ativa, limitada, para estudar **reflected Cross-Site Scripting (XSS refletido)**. Primeiro identificaremos reflexão de entrada de forma não executável e depois avaliaremos o contexto. O projeto não será um scanner de exploração genérico.
 
-## Decisão de escopo
+## Por que começar por XSS refletido?
 
-Comece com uma **CLI local em Python** que recebe uma URL autorizada, faz poucas requisições `GET` e gera um relatório. Python reaproveita sua experiência com automação/RPA: HTTP, tratamento de erros, parsing e relatórios são habilidades transferíveis.
+É uma boa primeira investigação ativa porque conecta diretamente o que já existe (requisição HTTP, query string e resposta) a conceitos centrais de segurança web: entrada controlada pelo usuário, codificação de saída e contexto HTML/JavaScript. O ciclo pode ser observado numa resposta do laboratório sem autenticação ou alteração persistente de dados.
 
-A versão inicial é **passiva e não intrusiva**. Ela pode apontar configurações e exposições visíveis, mas não confirma falhas que dependem de contexto, autenticação ou exploração. Por exemplo, um scanner passivo não consegue afirmar com confiança que encontrou SQL injection, XSS explorável, IDOR/controle de acesso quebrado, SSRF ou falhas de lógica de negócio.
+O objetivo da primeira versão ativa **não é executar JavaScript nem provar impacto contra usuários**. O scanner enviará apenas um marcador aleatório e inerte, como texto alfanumérico, para um parâmetro explicitamente indicado. Se esse marcador aparecer na resposta, o resultado será “entrada refletida”, não “XSS confirmado”. A prova de XSS depende do contexto de saída, do encoding e do comportamento do navegador; reflexão textual sozinha não é vulnerabilidade.
 
-**Use apenas em sistemas próprios, ambientes de laboratório ou alvos para os quais você tenha autorização explícita.** Não disponibilize o scanner como serviço público que aceita URLs arbitrárias.
+> **Uso:** a pessoa que executa é responsável por ter autorização e definir o escopo. A implementação será integrada ao fluxo do comando `scan`, mas a parte ativa será opt-in, limitada a endpoint/parâmetro informados e terá proteções contra varreduras amplas ou acidentais. Desenvolver e validar primeiro em laboratório local ou fixture; não usar em alvos sem autorização explícita.
 
-## Resultado esperado do MVP
+## O que já existe
 
-Uma execução como `webscan https://meu-lab.example` deve:
+- CLI `webscan scan`, com análise passiva e uma sonda ativa opt-in;
+- validação básica de URL, TLS verificado e política de destino público/loopback;
+- observações passivas de cabeçalhos e flags de cookies;
+- sonda de reflexão que envia um único marcador inerte para um parâmetro indicado, exige `--lab` e IP loopback literal em conexões reais, não segue redirects e limita a leitura da resposta;
+- testes com respostas HTTP simuladas, incluindo redirects, resposta grande e proteção contra hostname na sonda ativa.
 
-1. validar e exibir o escopo do alvo;
-2. consultar a página inicial, sem enviar formulários ou payloads de teste;
-3. observar HTTPS, status, redirecionamentos, cabeçalhos e cookies;
-4. emitir achados com evidência, explicação, recomendação e limitações;
-5. salvar um relatório Markdown ou JSON;
-6. funcionar contra um servidor de teste local e ter testes automatizados.
+O scanner ainda **não faz crawling**, não descobre formulários nem parâmetros e não classifica com segurança o contexto HTML da reflexão. A sonda só informa que o marcador foi ou não observado; isso não confirma XSS.
 
-### Verificações iniciais
+## Fases
 
-- **Transporte:** URL usa HTTPS; certificado TLS é validado pelo cliente HTTP (não desabilitar essa validação).
-- **Cabeçalhos:** presença/configuração de HSTS em HTTPS, CSP, `X-Content-Type-Options`, proteção contra framing (`frame-ancestors` ou `X-Frame-Options`) e `Referrer-Policy`.
-- **Cookies recebidos:** sinalizar `Secure`, `HttpOnly` e `SameSite` ausentes, sem presumir que cada cookie exige todos os atributos.
-- **Exposição de tecnologia:** valores excessivamente detalhados em `Server`/`X-Powered-By` e mensagens de erro potencialmente informativas.
-- **Redirecionamento:** registrar o status e o cabeçalho `Location`; não seguir redirects no MVP. Um seguimento limitado a same-origin pode ser avaliado depois, com controles de escopo.
+Ritmo sugerido: 4–5 sessões de 45–90 minutos por semana. Cada fase termina com teste e nota breve explicando evidência e limitações.
 
-Trate ausência de cabeçalho como **sinal para revisão**, não como prova automática de vulnerabilidade. Contexto (por exemplo, API JSON versus página HTML), arquitetura e necessidade de compatibilidade mudam a interpretação.
+### Fase 0 — Preparar o fluxo padrão `scan` (implementada)
 
-## Plano curto: 4 etapas
+**Estudar:** escopo de autorização, diferença entre modo passivo e ativo, efeitos de redirects, limite de requisições e risco de um scanner que aceita URLs.
 
-Ritmo sugerido: 4–5 sessões semanais de 45–90 minutos. Em cada sessão, estude só o conceito necessário para a próxima entrega e implemente algo pequeno.
+**Construir antes de qualquer sonda:**
 
-### Etapa 1 — Fundamentos e primeira resposta (dias 1–3)
+- integrar a análise passiva e a ativa ao fluxo do comando `webscan scan`, mantendo a análise ativa desativada por padrão e habilitada por opção explícita, como `--active-xss`;
+- começar o desenvolvimento e a validação em loopback/fixture; manter validação de URL, escopo explícito, TLS verificado e redirects desativados;
+- exigir que a pessoa informe um único endpoint e o nome do parâmetro a testar — sem spider, descoberta automática ou submissão de formulário;
+- permitir apenas `GET`, não enviar credenciais/cookies e não seguir redirects;
+- limite pequeno configurável e explícito de requisições, timeout, limite efetivo de bytes, User-Agent identificável e pausa entre requisições;
+- abortar em erro de escopo, redirect, resposta grande ou falha de rede, sem tentar outros caminhos;
+- imprimir o alvo, parâmetro e número máximo de requisições antes de começar.
 
-**Estudar:** URL, DNS em alto nível, HTTP request/response, status, TLS, cabeçalhos e exceções/timeouts em Python.
+**Concluído quando:** testes provam que `webscan scan` mantém o comportamento passivo sem opção ativa, limita a sonda a um endpoint/parâmetro definido, não segue redirects e aborta em entradas inválidas; os testes usam mocks ou loopback.
 
-**Construir:** CLI que valida esquema `http`/`https`, faz uma requisição `GET` para um alvo de laboratório e imprime status, URL consultada (sem seguir redirects por padrão) e cabeçalhos relevantes.
+### Fase 1 — Aprender reflexão de entrada sem payload executável (implementada)
 
-**Concluído quando:** timeout, DNS inválido, certificado inválido e resposta HTTP normal produzem mensagens claras; a validação TLS continua habilitada.
+**Estudar:** query parameters, percent-encoding, marcador único, diferença entre reflexão e execução, conteúdo HTML e escaping.
 
-### Etapa 2 — Regras passivas e segurança do próprio scanner (dias 4–7)
+**Construir:** para um endpoint e parâmetro fornecidos manualmente, enviar um marcador alfanumérico aleatório e curto em uma requisição `GET`. Ler somente resposta limitada, procurar o marcador e registrar se aparece e quantas vezes. Preservar uma cópia sanitizada do contexto ao redor do marcador, sem guardar tokens, cookies ou resposta completa.
 
-**Estudar:** cabeçalhos de segurança, cookies e o que uma checagem passiva pode ou não concluir.
+**Resultado esperado:** achado `input-reflected` ou `input-not-observed`, com endpoint redigido, parâmetro, posição aproximada, status e evidência sanitizada. Não rotular como XSS.
 
-**Construir:** regras independentes para os cabeçalhos e cookies da lista acima; cada regra deve devolver um achado estruturado, com evidência mínima e recomendação. Adicione timeout, limite de bytes da resposta, limite de requisições e User-Agent identificável.
+**Concluído quando:** fixture local cobre reflexão em texto, ausência de reflexão, múltiplas ocorrências, resposta sem HTML, marcador transformado e limite de corpo; nenhuma requisição vai para rede externa.
 
-**Proteções obrigatórias:** execução local, escopo explícito por hostname, somente `GET`, sem autenticação/cookies fornecidos pelo usuário, sem formulários, sem payloads e sem seguir redirects fora do escopo. Limite de taxa baixo. Para domínios públicos, rejeite destinos não públicos e use também restrição de saída de rede (firewall/ambiente isolado); uma checagem DNS feita antes da conexão, sozinha, não elimina DNS rebinding. Para laboratório local, use uma opção explícita de modo-lab e mantenha o serviço isolado.
+### Próxima fase — Entender contexto e encoding
 
-**Concluído quando:** o programa recusa esquemas inesperados, não atravessa redirects para outro host, e as regras têm testes para presente/ausente e casos de contexto.
+**Estudar:** contextos de saída (texto HTML, atributo HTML, string JavaScript), codificação contextual, DOM e por que regex simples não prova explorabilidade.
 
-### Etapa 3 — Relatório e qualidade (semana 2)
+**Construir:** classificador conservador do contexto do marcador em HTML usando parser, se aplicável. Diferenciar “texto refletido”, “reflexão em atributo/texto/script aparentemente codificada” e “contexto indeterminado”. Em caso duvidoso, informar que requer revisão manual. Não executar o conteúdo no browser nem enviar strings executáveis.
 
-**Construir:** relatório Markdown legível e JSON estável; agrupar achados repetidos; registrar URL, horário, status e limitações; incluir nível de confiança e severidade conservadora (por exemplo, `info`/`baixo`, quando aplicável). Não coletar nem armazenar corpos completos por padrão.
+**Concluído quando:** testes locais incluem HTML escapado, atributos entre aspas, resposta não HTML e contexto ambíguo; a ferramenta nunca declara XSS confirmado apenas por encontrar o marcador.
 
-**Testar:** servidor HTTP local com respostas simuladas, testes unitários por regra, URL malformada, timeout, redirects, cookies múltiplos e respostas grandes. Não use sites de terceiros como fixtures de testes.
+### Fase 3 — Validação comparativa em laboratório
 
-**Concluído quando:** execução repetida em fixture produz resultados previsíveis e o JSON pode ser consumido por outro script RPA/CI.
+1. Usar uma aplicação deliberadamente vulnerável **local** (por exemplo, OWASP Juice Shop) e/ou uma fixture mínima própria com casos de reflexão codificada e não codificada.
+2. Comparar a observação do WebScan com a inspeção manual do HTML retornado e com os materiais da PortSwigger Academy.
+3. Registrar falsos positivos e negativos; não testar sites de terceiros nem reutilizar exemplos contra alvos reais.
+4. Acrescentar relatório JSON/Markdown com nível de confiança, evidência mínima, recomendação defensiva e limitações.
 
-### Etapa 4 — Validação e portfólio (semana 3; opcional semana 4)
+**Concluído quando:** outra pessoa reproduz os casos no laboratório e entende por que “refletido” é diferente de “executável/vulnerável”.
 
-1. Rode o scanner somente no seu laboratório, como OWASP Juice Shop local.
-2. Compare as observações passivas com o **OWASP ZAP Baseline Scan**, que documenta uma abordagem passiva de curta duração. Investigue diferenças e falsos positivos; não copie resultados sem entender a regra.
-3. Escreva no README como instalar, executar, quais riscos cobre, quais não cobre, limites de uso e um exemplo de relatório sanitizado.
-4. Grave uma demonstração curta e inclua testes automatizados no repositório. Isso transforma o projeto em evidência de engenharia, não apenas em uma lista de ferramentas.
+### Fase 4 — Integração e documentação
 
-**Concluído quando:** outra pessoa consegue executar o projeto no laboratório, entender um achado e reproduzir os testes sem instruções particulares.
+- Atualizar README e guia de iniciantes com a diferença entre testes passivos e ativos.
+- Documentar como usar o comando `scan` em modo passivo e como habilitar, de forma explícita, a verificação ativa limitada.
+- Documentar escopo, pré-requisitos de autorização, limites da análise e como interpretar os resultados.
+- Rodar testes e lint antes de cada versão; não incluir relatório com cookies, tokens ou dados pessoais.
 
-## O que deixar para depois
+**Concluído quando:** o projeto explica o raciocínio, os controles e as limitações, e os testes automatizados reproduzem o comportamento previsto.
 
-Somente após o MVP e estudo separado, considere crawl limitado de links same-origin, análise de `robots.txt`/sitemap como fontes de URLs, autenticação em ambiente próprio, análise de dependências/SBOM, ou checks ativos em modo estritamente isolado. Antes de adicionar crawl, defina limites de páginas/profundidade, deduplicação, taxa, regras de escopo e exclusões de rotas com efeitos colaterais.
+## Limites que não devem ser removidos nesta trilha
 
-**Fora do MVP:** brute force, fuzzing, exploração automática, envio de payloads de SQLi/XSS, submissão de formulários, testes de escrita/alteração, varredura de portas e qualquer execução contra alvos arbitrários. Esses recursos aumentam risco e complexidade, e não são necessários para demonstrar um primeiro scanner funcional.
+- O modo ativo exige opt-in, escopo explícito e um único endpoint/parâmetro; não aceitar URLs arbitrárias de usuários como serviço público.
+- Sem crawl, brute force, fuzzing, payloads executáveis, coleta de dados, envio de formulário, autenticação ou alteração de estado.
+- Sem seguir redirects ou resolver subdomínios automaticamente.
+- Começar com um endpoint, um parâmetro e poucas requisições; sem concorrência.
+- Redigir query strings e nunca persistir cookies, credenciais ou corpos integrais.
+- Diferenciar claramente evidência observada, hipótese e vulnerabilidade confirmada.
 
-## Como estudar sem transformar em maratona
+O uso em qualquer sistema deve estar coberto por autorização e escopo definidos por quem executa. A opção ativa não deve transformar o projeto em crawler/atacante autônomo nem remover limites de requisições.
 
-Use um ciclo simples por tema: **20–30 min de leitura → 30–60 min de laboratório autorizado → uma nota curta sobre evidência e limites → uma regra/teste no projeto**. Priorize apenas:
+## Por que não começar por SQLi, SSRF ou IDOR?
 
-1. HTTP, cookies, TLS e cabeçalhos;
-2. leitura introdutória do OWASP Top 10;
-3. fundamentos de XSS, SQL injection e controle de acesso, para entender por que checagens passivas não bastam;
-4. prática em laboratórios interativos da PortSwigger Web Security Academy;
-5. revisão do resultado com o OWASP WSTG e comparação com ZAP Baseline.
+- **SQL injection:** técnicas de detecção podem envolver entradas de teste que mudam consultas ou timing e podem afetar sistemas; é melhor estudar primeiro em labs e evoluir com um plano de segurança separado.
+- **SSRF:** testar pode induzir o alvo a fazer conexões a redes internas; é uma fronteira de rede de maior risco.
+- **IDOR/controle de acesso:** exige identidades e dados de teste, e comparar autorização entre usuários, algo que o scanner ainda não suporta com segurança.
 
-Não tente “implementar o OWASP Top 10 inteiro” no scanner. Use o Top 10 como mapa de riscos e o WSTG como referência de testes; converta apenas um conceito de cada vez em uma checagem cuja evidência você consegue explicar.
+XSS refletido com marcador inerte oferece um recorte didático e verificável sem tentar explorar a execução. A implementação fica integrada ao `scan`, com opt-in e validação inicial em laboratório.
 
-## Critérios de qualidade do projeto
+## Como estudar sem maratona
 
-- Cada achado explica **o que foi observado**, **por que pode importar**, **como corrigir** e **o que a ferramenta não conseguiu verificar**.
-- Findings descrevem sinais, não fazem alegações de exploração sem evidência.
-- Regras têm testes automatizados; falhas de rede não viram “site vulnerável”.
-- O escopo e os limites de requisição são visíveis antes de iniciar.
-- Não se armazenam credenciais, cookies de sessão ou conteúdo sensível.
-- README deixa claro que ferramenta automatizada não substitui revisão manual nem autorização.
+Para cada conceito: **20–30 min de leitura → 30–60 min de laboratório local → anotar hipótese/evidência/limitação → criar um teste automatizado**. Ordem sugerida:
+
+1. HTTP GET, query parameters e percent-encoding;
+2. reflexão de entrada e encoding de saída;
+3. HTML e contextos de saída;
+4. classificação de achados e falsos positivos;
+5. testes automatizados com servidor/transport simulado.
+
+O OWASP Top 10 é mapa de riscos, não uma lista de funcionalidades a implementar. Use o WSTG e a Web Security Academy como referências pontuais para o assunto estudado.
+
+## Critérios de qualidade
+
+- Todo achado mostra o que foi enviado e observado, por que importa, correção defensiva e limitações.
+- “Reflexão detectada” nunca vira automaticamente “XSS confirmado”.
+- Os testes ativos usam mocks ou loopback; não há chamada real a domínios de terceiros na suíte.
+- Os limites estão visíveis antes da requisição; exceções de rede não viram achados de vulnerabilidade.
+- O modo passivo mantém seu comportamento e o ativo permanece opt-in.
 
 ## Referências selecionadas
 
-- [OWASP Top 10 (versão atual)](https://owasp.org/Top10/2025/) — panorama de riscos; ponto de partida, não checklist completo de scanner.
-- [OWASP Web Security Testing Guide (WSTG)](https://owasp.org/www-project-web-security-testing-guide/) — referência para metodologia e testes web; use os tópicos pertinentes, não tente ler tudo de uma vez.
-- [OWASP Cheat Sheet: HTTP Security Response Headers](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html) — recomendações e ressalvas de cabeçalhos/cookies.
-- [OWASP Cheat Sheet: SSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) — importante porque um programa que busca URLs pode ser abusado como cliente de rede; reforça validação, escopo e controles de rede.
-- [ZAP Baseline Scan](https://www.zaproxy.org/docs/docker/baseline-scan/) — exemplo de baseline passiva e relatórios; não confundir com teste abrangente.
-- [PortSwigger Web Security Academy](https://portswigger.net/web-security) — material gratuito e laboratórios interativos para estudar vulnerabilidades com segurança.
-- [OWASP Juice Shop](https://owasp.org/www-project-juice-shop/) — aplicação deliberadamente vulnerável para laboratório e avaliação de ferramentas.
+- [PortSwigger — Reflected XSS](https://portswigger.net/web-security/cross-site-scripting/reflected) — conceito, contextos de reflexão e processo de análise.
+- [PortSwigger — Reflected XSS Apprentice Lab](https://portswigger.net/web-security/cross-site-scripting/reflected/lab-html-context-nothing-encoded) — laboratório de aprendizagem; usar somente no ambiente oficial da Academy e manualmente, não como alvo do scanner.
+- [PortSwigger Web Security Academy — todos os labs](https://portswigger.net/web-security/all-labs) — trilhas de XSS por nível, incluindo exercícios Apprentice.
+- [OWASP Web Security Testing Guide](https://owasp.org/www-project-web-security-testing-guide/) — metodologia; consultar o capítulo de validação de entrada e XSS.
+- [OWASP Cross Site Scripting Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html) — orientação defensiva sobre encoding contextual.
+- [OWASP Juice Shop](https://owasp.org/www-project-juice-shop/) — aplicação deliberadamente vulnerável para laboratório local.
 
 ## Próximo passo
 
-Comece pela Etapa 1 e limite a primeira entrega a uma URL e uma resposta HTTP. O foco inicial é terminar um scanner pequeno, seguro e honesto sobre seus limites — ampliar cobertura vem depois.
+Implementar a próxima fase: classificar de forma conservadora o contexto do marcador na resposta HTML. Não começar por payloads executáveis nem remover os limites de escopo e volume.

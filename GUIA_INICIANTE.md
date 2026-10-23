@@ -2,7 +2,7 @@
 
 Este guia acompanha o código atual do projeto e explica o que acontece quando você executa uma análise. A ideia não é decorar cada linha: é entender o fluxo, as escolhas de segurança e o que os resultados realmente permitem concluir.
 
-> **Escopo atual:** o WebScan faz uma requisição HTTP `GET`, não segue redirecionamentos, não envia payloads e não analisa o corpo da página. Suas regras observam alguns cabeçalhos e atributos de cookies. Os resultados são sinais para revisão, não confirmação de vulnerabilidades.
+> **Escopo atual:** o WebScan faz uma requisição passiva `GET`, não segue redirecionamentos e observa cabeçalhos/cookies. Opcionalmente, com `--active-xss --lab --param`, envia uma única sonda GET com marcador alfanumérico inerte e lê a resposta até um limite de bytes. Não executa payloads nem confirma XSS. Use somente dentro de escopo autorizado.
 
 ## 1. O percurso de uma execução
 
@@ -17,6 +17,7 @@ terminal
   → HTTPX envia uma requisição GET
   → resposta é reduzida a metadados e atributos de cookies
   → regras passivas produzem Findings
+  → (opcional) sonda ativa envia marcador inerte para um parâmetro explicitamente indicado
   → Rich mostra cabeçalhos e sinais no terminal
 ```
 
@@ -24,7 +25,7 @@ A sequência começa em [pyproject.toml](pyproject.toml), que registra `webscan 
 
 ## 2. O que a CLI faz
 
-A biblioteca **Typer** transforma argumentos do terminal em parâmetros Python. Neste projeto, `scan` recebe a URL e a opção `--lab`. A CLI cria a configuração padrão, chama `inspect_url()` e trata erros esperados:
+A biblioteca **Typer** transforma argumentos do terminal em parâmetros Python. Neste projeto, `scan` recebe a URL e as opções `--lab`, `--active-xss` e `--param`. A CLI cria a configuração padrão, chama `inspect_url()` e, só se a pessoa pedir explicitamente, `probe_reflection()`. O modo ativo exige `--lab` e um nome de parâmetro; ele envia no máximo uma requisição adicional.
 
 - URL fora do formato aceito: erro de entrada;
 - destino fora da política: erro de escopo;
@@ -72,9 +73,17 @@ A resposta é consumida como um `ResponseSummary`, definido em [src/webscan/http
 
 `display_url()` remove query strings antes de exibir/armazenar URLs. Isso reduz o risco de vazar tokens que alguns sistemas colocam na query, embora o caminho da URL ainda possa conter informação sensível.
 
+### Sonda ativa de reflexão
+
+O módulo [src/webscan/active_xss.py](src/webscan/active_xss.py) gera um marcador alfanumérico aleatório, substitui um único parâmetro da query string e envia uma requisição `GET` com redirects desativados. O nome do parâmetro é validado para não permitir sintaxe arbitrária na entrada. Em conexões reais, exige IP loopback literal (`127.0.0.1` ou `::1`), evitando uma validação DNS seguida de nova resolução na conexão. Nenhum JavaScript ou payload executável é usado.
+
+O corpo é lido em streaming e o scanner para se o limite `max_response_bytes` for ultrapassado. Também recusa respostas com `Content-Encoding` comprimido, pois verificar o tamanho comprimido não limita o tamanho descomprimido com segurança. Um redirect encerra a sonda, sem visitar o `Location`. O resultado mantém apenas contagem de reflexão e um pequeno trecho de contexto; query strings não são mantidas no campo de URL do resultado.
+
+Se o marcador aparecer, o relatório diz somente **“marcador refletido”**. Isso não confirma XSS: o texto pode aparecer escapado ou em contexto não executável. A etapa atual ainda não classifica de forma confiável o contexto HTML nem testa execução no navegador.
+
 ### O que ainda não está implementado nessa camada
 
-A configuração [src/webscan/config.py](src/webscan/config.py) já declara `max_response_bytes`, `max_requests`, `requests_per_second` e `follow_redirects`, mas nem todos esses limites estão conectados ao transporte. Hoje há só uma requisição `GET` por execução e redirects estão desativados explicitamente. **O limite de bytes ainda não é aplicado**; o scanner não lê nem armazena o corpo, mas não se deve interpretar esse campo da configuração como proteção já implementada. Limitação de taxa e limite configurável de requisições também precisam ser implementados antes de adicionar crawling ou várias consultas.
+A configuração [src/webscan/config.py](src/webscan/config.py) declara `max_requests`, `requests_per_second` e `follow_redirects`; estes ainda não são controles gerais para crawling. O comando atual faz a consulta passiva e no máximo uma sonda opcional, com intervalo configurado e limite de bytes aplicado somente à leitura da resposta ativa. Não há crawler nem concorrência.
 
 `trust_env=False` impede que variáveis de proxy do ambiente alterem a conexão. Isso ajuda a tornar o comportamento previsível, mas pode impedir o acesso em redes que dependem de proxy corporativo.
 
@@ -136,11 +145,11 @@ Os testes unitários em [test_http_client.py](tests/unit/test_http_client.py), [
 
 Esses testes demonstram o comportamento para os casos simulados. **Não provam** que o scanner detecta todas as configurações incorretas, nem substituem testes em ambiente controlado, revisão manual ou autorização.
 
-Para rodar a suíte: `./.venv/bin/pytest -q`. Para checar estilo: `./.venv/bin/ruff check src tests`.
+Para rodar a suíte: `./.venv/bin/pytest -q`. Para checar estilo: `./.venv/bin/ruff check src tests`. Testes ativos usam somente transportes simulados.
 
 ## 10. O que este scanner não detecta
 
-Uma única requisição sem autenticação, crawling ou payloads não consegue avaliar de forma confiável:
+Uma consulta passiva e uma única sonda de marcador inerte, sem autenticação ou crawling, não conseguem avaliar de forma confiável:
 
 - SQL injection ou XSS explorável;
 - controle de acesso, IDOR e autorização entre usuários;
@@ -160,7 +169,7 @@ O WebScan também não é um scanner completo de portas, TLS, dependências ou c
 5. Rode os testes unitários e altere mentalmente uma resposta simulada para entender como um atributo muda o resultado.
 6. Anote uma limitação: por exemplo, por que a ausência de CSP não prova que existe XSS?
 
-Use o modo `--lab` somente com servidor local ligado à interface loopback, como `127.0.0.1`. Ele não é uma autorização para varrer a rede local.
+Use `--lab` para a sonda ativa somente com servidor local ligado à interface loopback, como `127.0.0.1`. Ele não é uma autorização para varrer a rede local. Exemplo: `webscan scan --lab --active-xss --param q http://127.0.0.1:3000/search?q=teste`.
 
 ## 12. Leituras de apoio
 
